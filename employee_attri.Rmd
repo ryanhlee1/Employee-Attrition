@@ -1,0 +1,933 @@
+---
+title: "PSTAT 175 Final Project"
+author: "Joshua Harasaki, Ryan Lee, Tyler Kim"
+date: "2022-11-28"
+output: pdf_document
+bibliography: references.bib
+---
+
+@Manual{clustcurv,
+  title = {clustcurv: An R Package for Determining
+  Groups in Multiple Curves},
+  author = {{Nora M. Villanueva, Marta Sestelo, Luis Meira-Machado and Javier Roca-Pardiñas}},
+  address = {Vigo, Spain},
+  year = {2019},
+  url = {https://journal.r-project.org/archive/2021/RJ-2021-032/RJ-2021-032.pdf},
+}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("MASS")
+library("scales")
+library("tidyverse")
+library("KernSmooth")
+library("dplyr")
+library("tinytex")
+library("survival")
+library("KMsurv")
+library("knitr")
+library("survminer")
+```
+
+# I. Abstract
+
+Employee retention is often a key metric that's observed to determine the success of a company. Human resources departments expend a lot of effort trying to keep employees around at their company for as long as possible. In this project, we want to explore the different variables that impact employees' decision to leave a company, and will do so by building a Cox Proportional Hazards model. 
+
+
+# II. Data and Description of Covariates
+
+To explore this issue, we are using IBM's Employee Attrition dataset found on Kaggle. This dataset is fictional data created by IBM data scientists intended to be used in a Kaggle competition. Although it is fictional, it was intended to be reflective of the real-world. The data set contains a total of 1,470 observations with 35 columns which include both categorical and numerical values. However, we have chosen to only include 19 of these columns as some of the columns were flawed. Reasons to not include some of the columns include not having enough values for a certain category, data being too unevenly distributed, columns having only one unique value, and not having enough information to interpret the column. These variables include:
+
+<table>
+
+Covariate                   Description
+-------------               ---------
+Age                         age of employee
+Attrition                   employee attrition 
+BusinessTravel              frequency of travel for employee
+DistanceFromHomeemployee    distance from home
+Education                   level of education (1 ‘Below College’ 2 ‘College’ 3 ‘Bachelor’ 4 ‘Master’ 5 ‘Doctor’)
+EnvironmentSatisfaction     satisfaction level of environment (1 ‘Low’ 2 ‘Medium’ 3 ‘High’ 4 ‘Very High’)
+Gender                      gender
+JobInvolvement              level of job involvement (1 ‘Low’ 2 ‘Medium’ 3 ‘High’ 4 ‘Very High’)
+JobLevel                    employee job level
+JobSatisfaction             level of job satisfaction (1 ‘Low’ 2 ‘Medium’ 3 ‘High’ 4 ‘Very High’)
+MaritalStatus               marital status
+MonthlyIncome               employee monthly income
+NumCompaniesWorked          total number of companies worked
+OverTime                    indicator for whether overtime (Yes, No)
+PercentSalaryHike           increase in the current salary of any employee by a certain amount.
+RelationshipSatisfaction    categorical variable for relationship satisfaction
+                            (1 'Low' 2’'Medium' 3 'High' 4 'Very High') 
+TrainingTimesLastYear       number of times employee went through training last year
+WorkLifeBalance             categorical variable for W/L balance (1 'Bad' 2 'Good' 3 'Better' 4 'Best')
+YearsAtCompany              number of years at company worked for
+
+</table>
+
+
+# III. Research Goal
+
+The goal of this project is to explore which factors influence employee attrition the most. We want to explore how each significant covariate impacts employee attrition from the perspective of a Human Resources department that seeks to increase employee retention. 
+
+# IV. Data Cleaning
+
+First, we inspected the data to ensure there were no missing values. Running the R function sum(is.na(raw.data)) returned 0, so we can conclude that there are no missing values in our dataset. 
+
+```{r}
+# load the data
+raw.data = read.csv("Employee-Attrition.csv")
+# print number of missing values
+sum(is.na(raw.data))
+```
+Our dataset has no missing values.
+
+Next, we removed columns that didn’t have enough values for a certain category, were too unevenly distributed, consisted of only one unique value, or were too difficult to interpret. This resulted in a dataset with 19 columns (shown in section II.) from the 35 columns in the raw data.
+```{r}
+# remove EmployeeCount, Over18, and StandardHours because these columns only contain one value
+data <- subset(raw.data, select = -c(EmployeeCount, Over18, StandardHours))
+# remove EmployeeNumber because it doesn't provide information to predict survival rate
+data <- subset(data, select = -EmployeeNumber)
+# remove JobRole because it has too many different categorical values
+data <- subset(data, select = -JobRole)
+# remove PerformanceRating because the values are only 3 or 4
+data <- subset(data, select = -c(PerformanceRating))
+# remove years
+data <- subset(data, select = -c(YearsInCurrentRole, YearsSinceLastPromotion, YearsWithCurrManager, TotalWorkingYears))
+# remove Department (too little values for HR)
+data <- subset(data, select = -Department)
+# remove rates as it doesn't correlate with Monthly Income
+data <- subset(data, select = -c(DailyRate, HourlyRate, MonthlyRate))
+# remove stock option as we don't know how to interpret it
+data <- subset(data, select = -StockOptionLevel)
+# remove education field as it is unevenly distributed
+data <- subset(data, select = -EducationField)
+```
+
+Next, we performed feature engineering by creating new groups from the existing numerical and categorical covariates to reduce the number of categories and even out the distribution of values. 
+
+![](~/Desktop/PSTAT 175/Final Project/uneven_dist.png)
+As you can see in the histograms above, some categories or ranges of values had significantly more observations than others, so we created new groups to even out this distribution below.
+
+```{r}
+# For the categorical columns
+data["JobLevel"][data["JobLevel"] == "1"] <- "Entry"
+data["JobLevel"][data["JobLevel"] == "2"] <- "Mid"
+data["JobLevel"][data["JobLevel"] == "3" | data["JobLevel"] == "4" | data["JobLevel"] == "5"] <- "Senior"
+
+data["BusinessTravel"][data["BusinessTravel"] == "Non-Travel"] <- "RareOrNo_Travel"
+data["BusinessTravel"][data["BusinessTravel"] == "Travel_Rarely"] <- "RareOrNo_Travel"
+
+data["JobInvolvement"][data["JobInvolvement"] == 1 | data["JobInvolvement"] == 2] <- "Low/Medium"
+data["JobInvolvement"][data["JobInvolvement"] == 3 | data["JobInvolvement"] == 4] <- "High"
+
+data["MaritalStatus"][data["MaritalStatus"] == "Single" | data["MaritalStatus"] == "Divorced"] <- "Single/Divorced"
+
+data["WorkLifeBalance"][data["WorkLifeBalance"] == 1 | data["WorkLifeBalance"] == 2] <- "Low/Medium"
+data["WorkLifeBalance"][data["WorkLifeBalance"] == 3 | data["WorkLifeBalance"] == 4] <- "High"
+```
+
+```{r}
+# For the numerical columns
+data$Education <- cut(data$Education,
+                       breaks=c(0, 2, 3, 5),
+                       labels=c('Below_Bachelors', 'Bachelors', 'Grad'))
+
+#data$DistanceFromHome <- cut(data$DistanceFromHome,
+                       #breaks=c(0, 5, 10, 29),
+                       #labels=c('1-5', '6-10', '11-29'))
+
+# replace 0's with 0.25
+#data["NumCompaniesWorked"][data["NumCompaniesWorked"] == 0] <- 0.25
+
+#data$NumCompaniesWorked <- cut(data$NumCompaniesWorked,
+                       #breaks=c(0, 1, 4, 9),
+                       #labels=c('0-1', '2-4', '5-9'))
+
+data$PercentSalaryHike <- cut(data$PercentSalaryHike,
+                       breaks=c(10, 13, 16, 26),
+                       labels=c('11-13', '14-16', '17-25'))
+
+# replace 0's with 0.25
+data["TrainingTimesLastYear"][data["TrainingTimesLastYear"] == 0] <- 0.25
+
+data$TrainingTimesLastYear <- cut(data$TrainingTimesLastYear,
+                       breaks=c(0, 3, 6),
+                       labels=c('0-3', '4-6'))
+```
+
+# V. Data Analysis
+
+Before building our model, we wanted to explore relationships between some of our covariates. This also served as a way to ensure that our data is reflective of the real world. First, we took a look at the mean income for each education level. We expect mean income to increase with higher education levels, and we inspect this relationship in the bar graph below. 
+
+```{r}
+# calculate the mean income for each Education Level
+plotdata <- data %>%
+  group_by(Education) %>%
+  summarize(mean_income = mean(MonthlyIncome))
+
+# plot mean incomes
+ggplot(plotdata, 
+       aes(x = factor(Education,
+                      labels = c("Below Bachelors", "Bachelor", "Grad")),
+           y = mean_income)) +
+  geom_bar(stat = "identity", fill = "cornflowerblue") +
+  geom_text(aes(label = dollar(mean_income)), vjust = -0.25) +
+  labs(x = "Education Level", y = "Mean Income")
+```
+
+Let's do the same for job level. We expect that income increases with higher job levels, and through the plot we can see that income increases with higher job levels.
+
+```{r}
+# calculate the mean income for each Job Level
+plotdata <- data %>%
+  group_by(JobLevel) %>%
+  summarize(mean_income = mean(MonthlyIncome))
+
+# plot mean incomes
+ggplot(plotdata, 
+       aes(x = factor(JobLevel,
+                      labels = c("Entry", "Mid", "Senior")),
+           y = mean_income)) +
+  geom_bar(stat = "identity", fill = "cornflowerblue") +
+  geom_text(aes(label = dollar(mean_income)), vjust = -0.25) +
+  labs(x = "Job Level", y = "Mean Income")
+```
+
+Next, let’s explore the relationship between job level and age. We expect to see age increase for higher job levels, and the plot below confirms this relationship.
+
+```{r}
+ggplot(data) + geom_boxplot(aes(JobLevel, Age))   
+```
+
+Let’s also explore the Kaplan-Meier plot and the kernel density distribution.
+
+```{r}
+# recode the attrition column so that it contains 0s and 1s
+data$status <- with(data,ifelse(Attrition=="Yes", 1, 0))
+# create time component
+time <- data$YearsAtCompany
+# create status component
+status <- data$status 
+# create survival object
+data.surv <- Surv(time,status)
+# fit the survival object
+data.fit = survfit(data.surv ~ 1)
+# plot the KM estimate along with 95% confidence band
+plot(data.fit, lwd=1, col=c(1,2,2),main="KM Plot for Employee Attrition at IBM",
+     xlab="Survival Time", ylab="Survival Proportion")
+legend('topright', c("Estimated function curve","Confidence Band"), fill=c(1,2))
+```
+```{r}
+# Filled Density Plot
+op<-par(mfrow=c(2,2))
+d <- density(data$YearsAtCompany)
+plot(d, main="Kernel Density of Attrition")
+polygon(d, col="blue", border="blue")
+hist(data$YearsAtCompany, breaks=12, col="blue")
+par(op)
+```
+From the two plots above, we find that we don’t have much data after around 25 years. Thus, we decided to “cut off” our time value at 25 years and treat those who were still at the company after 25 years as censored data. Below are the updated Kaplan-Meier and kernel density plots.
+
+```{r}
+# censor employees who were at the company over 25 years
+data["status"][data["YearsAtCompany"] > 25] <- 0
+data["YearsAtCompany"][data["YearsAtCompany"] > 25] <- 25
+```
+
+```{r}
+# recode the attrition column so that it contains 0s and 1s
+data$status <- with(data,ifelse(Attrition=="Yes", 1, 0))
+# create time component
+time <- data$YearsAtCompany
+# create status component
+status <- data$status 
+# create survival object
+data.surv <- Surv(time,status)
+# fit the survival object
+data.fit = survfit(data.surv ~ 1)
+# plot the KM estimate along with 95% confidence band
+plot(data.fit, lwd=1, col=c(1,2,2),main="KM Plot for Employee Attrition at IBM After Cut Off",
+     xlab="Survival Time", ylab="Survival Proportion")
+legend('topright', c("Estimated function curve","Confidence Band"), fill=c(1,2))
+```
+```{r}
+# Filled Density Plot
+d <- density(data$YearsAtCompany)
+plot(d, main="Kernel Density of Attrition After Cut Off")
+polygon(d, col="blue", border="blue")
+par(op)
+```
+
+# VI. Model Fitting
+
+In order to find the most significant covariates to include in our Cox Proportional Hazards model, we performed forward feature selection. We start by fitting our model on all 17 of our covariates and calculated the AIC score for each model. 
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~Age, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~BusinessTravel, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~EnvironmentSatisfaction, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~Gender, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement, data=data)
+model8 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel, data=data)
+model9 <- coxph(Surv(data$YearsAtCompany,data$status)~JobSatisfaction, data=data)
+model10 <- coxph(Surv(data$YearsAtCompany,data$status)~MaritalStatus, data=data)
+model11 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome, data=data)
+model12 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked, data=data)
+model13 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime, data=data)
+model14 <- coxph(Surv(data$YearsAtCompany,data$status)~PercentSalaryHike, data=data)
+model15 <- coxph(Surv(data$YearsAtCompany,data$status)~RelationshipSatisfaction, data=data)
+model16 <- coxph(Surv(data$YearsAtCompany,data$status)~TrainingTimesLastYear, data=data)
+model17 <- coxph(Surv(data$YearsAtCompany,data$status)~WorkLifeBalance, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7, model8, model9, 
+              model10, model11, model12, model13, model14, model15, model16, model17)
+scoresAIC
+```
+Here is a list of all the AIC scores of the models we fit above. Let's find the model with the lowest AIC score.
+
+```{r}
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+The model that had the lowest AIC score was the model that included the covariate job level. Thus, we will continue to fit our model on all other covariates added to job level and, again, look for the model with the lowest AIC score. We intended to continue this process of adding onto the best performing model until we find that the AIC stops decreasing. 
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+Age, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+BusinessTravel, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+DistanceFromHome, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+TrainingTimesLastYear, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+EnvironmentSatisfaction, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+Gender, data=data)
+model8 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+JobInvolvement, data=data)
+model9 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+WorkLifeBalance, data=data)
+model10 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+JobSatisfaction, data=data)
+model11 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+MaritalStatus, data=data)
+model12 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+MonthlyIncome, data=data)
+model13 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+NumCompaniesWorked, data=data)
+model14 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+OverTime, data=data)
+model15 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+PercentSalaryHike, data=data)
+model16 <- coxph(Surv(data$YearsAtCompany,data$status)~JobLevel+RelationshipSatisfaction, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7, model8, model9, 
+              model10, model11, model12, model13, model14, model15, model16)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+The model that added "OverTime" produced the lowest AIC value.
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+Age, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+BusinessTravel, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+DistanceFromHome, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+RelationshipSatisfaction, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+EnvironmentSatisfaction, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+Gender, data=data)
+model8 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+JobInvolvement, data=data)
+model9 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+WorkLifeBalance, data=data)
+model10 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+JobSatisfaction, data=data)
+model11 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+MaritalStatus, data=data)
+model12 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+MonthlyIncome, data=data)
+model13 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+NumCompaniesWorked, data=data)
+model14 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+TrainingTimesLastYear, data=data)
+model15 <- coxph(Surv(data$YearsAtCompany,data$status)~OverTime+JobLevel+PercentSalaryHike, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7, model8, model9, 
+              model10, model11, model12, model13, model14, model15)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+The model that added "Age" produced the lowest AIC value.
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+RelationshipSatisfaction, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+BusinessTravel, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+DistanceFromHome, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+PercentSalaryHike, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+EnvironmentSatisfaction, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+Gender, data=data)
+model8 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+JobInvolvement, data=data)
+model9 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+WorkLifeBalance, data=data)
+model10 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+JobSatisfaction, data=data)
+model11 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+MaritalStatus, data=data)
+model12 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+MonthlyIncome, data=data)
+model13 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+NumCompaniesWorked, data=data)
+model14 <- coxph(Surv(data$YearsAtCompany,data$status)~Age+OverTime+JobLevel+TrainingTimesLastYear, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7, model8, model9, 
+              model10, model11, model12, model13, model14)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+The model that added "NumCompaniesWorked" produced the lowest AIC value.
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+RelationshipSatisfaction, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+BusinessTravel, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+DistanceFromHome, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+PercentSalaryHike, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+EnvironmentSatisfaction, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+Gender, data=data)
+model8 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+JobInvolvement, data=data)
+model9 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+WorkLifeBalance, data=data)
+model10 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+JobSatisfaction, data=data)
+model11 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+MaritalStatus, data=data)
+model12 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+MonthlyIncome, data=data)
+model13 <- coxph(Surv(data$YearsAtCompany,data$status)~NumCompaniesWorked+Age+OverTime+JobLevel+TrainingTimesLastYear, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7, model8, model9, 
+              model10, model11, model12, model13)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+
+The model that added "MonthlyIncome" produced the lowest AIC value.
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+RelationshipSatisfaction, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+BusinessTravel, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+DistanceFromHome, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+PercentSalaryHike, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+EnvironmentSatisfaction, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Gender, data=data)
+model8 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+JobInvolvement, data=data)
+model9 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+WorkLifeBalance, data=data)
+model10 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+JobSatisfaction, data=data)
+model11 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+MaritalStatus, data=data)
+model12 <- coxph(Surv(data$YearsAtCompany,data$status)~MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+TrainingTimesLastYear, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7, model8, model9, 
+              model10, model11, model12)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+
+The model that added "JobInvolvement" produced the lowest AIC value.
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+RelationshipSatisfaction, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+BusinessTravel, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+DistanceFromHome, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+PercentSalaryHike, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+EnvironmentSatisfaction, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Gender, data=data)
+model8 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+TrainingTimesLastYear, data=data)
+model9 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+WorkLifeBalance, data=data)
+model10 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+JobSatisfaction, data=data)
+model11 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+MaritalStatus, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7, model8, model9, model10, model11)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+
+The model that added "EnvironmentSatisfaction" produced the lowest AIC value.
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+RelationshipSatisfaction, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+BusinessTravel, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+DistanceFromHome, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+PercentSalaryHike, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+TrainingTimesLastYear, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Gender, data=data)
+model8 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+MaritalStatus, data=data)
+model9 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+WorkLifeBalance, data=data)
+model10 <- coxph(Surv(data$YearsAtCompany,data$status)~JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+JobSatisfaction, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7, model8, model9, model10)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+
+The model that added "DistanceFromHome" produced the lowest AIC value.
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+RelationshipSatisfaction, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+BusinessTravel, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+JobSatisfaction, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+PercentSalaryHike, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+TrainingTimesLastYear, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Gender, data=data)
+model8 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+MaritalStatus, data=data)
+model9 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+WorkLifeBalance, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7, model8, model9)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+
+The model that added "BusinessTravel" produced the lowest AIC value.
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+RelationshipSatisfaction, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+JobSatisfaction, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+WorkLifeBalance, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+PercentSalaryHike, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+TrainingTimesLastYear, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Gender, data=data)
+model8 <- coxph(Surv(data$YearsAtCompany,data$status)~DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+MaritalStatus, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7, model8)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+
+The model that added "JobSatisfaction" produced the lowest AIC value.
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+RelationshipSatisfaction, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+MaritalStatus, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+WorkLifeBalance, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+PercentSalaryHike, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+TrainingTimesLastYear, data=data)
+model7 <- coxph(Surv(data$YearsAtCompany,data$status)~JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Gender, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6, model7)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+
+The model that added "MaritalStatus" produced the lowest AIC value.
+
+```{r}
+model1 <- coxph(Surv(data$YearsAtCompany,data$status)~MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+RelationshipSatisfaction, data=data)
+model2 <- coxph(Surv(data$YearsAtCompany,data$status)~MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Gender, data=data)
+model3 <- coxph(Surv(data$YearsAtCompany,data$status)~MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+WorkLifeBalance, data=data)
+model4 <- coxph(Surv(data$YearsAtCompany,data$status)~MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Education, data=data)
+model5 <- coxph(Surv(data$YearsAtCompany,data$status)~MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+PercentSalaryHike, data=data)
+model6 <- coxph(Surv(data$YearsAtCompany,data$status)~MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+TrainingTimesLastYear, data=data)
+
+scoresAIC <- AIC(model1, model2, model3, model4, model5, model6)
+
+scoresAIC[min(scoresAIC$AIC)==scoresAIC$AIC,]
+```
+
+The model that added "Gender" produced the lowest AIC value.
+
+The AIC score continues to decrease for many covariates. We see that the AIC score went from 2780.191 in the previous iteration to 2777.778, which is only a difference of 3. Compared to the decreases in previous iterations ranging from 10-50, this difference is small. Thus, we will stop our forward selection process here.
+
+So, the model we end up with based on our foward selection is a model that includes covariates DistanceFromHome, JobLevel, BusinessTravel, JobInvolvement, EnvironmentSatisfaction, MonthlyIncome, Age, JobSatisfaction, MaritalStatus, NumCompaniesWorked, OverTime, and Gender for a total of 12 covariates.
+
+Below is the summary of our model that includes the 11 covariates we found from the forward selection process:
+
+```{r}
+final.cox <- coxph(Surv(time, status) ~ MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Gender, data =  data)
+summary(final.cox)
+```
+We found that the p-values are significant for each numerical covariate, and significant for at least one pair for each categorical covariate. The 95% confidence interval for the hazard ratio also implies significance of the covariates as we found that the null value one is excluded in the intervals. 
+
+# VII. Analysis of Covariates
+
+Let’s explore the effects of the covariates on attrition by plotting Kaplan-Meier plots for each covariate. We will also show the summary of the coxph model with the covariate to give a quantified conclusion of the effect of the covariate. Let’s start with marital status.
+
+### Marital Status
+
+```{r}
+# summary
+MaritalStatus.cox = coxph(data.surv ~ MaritalStatus, data = data)
+summary(MaritalStatus.cox)
+
+# fit plot for OverTime
+MaritalStatus.fit = survfit(data.surv ~ MaritalStatus, data = data)
+# plot the fitted survival function
+plot(MaritalStatus.fit,
+     lwd=1, col=c('blue','red'),
+     main="KM Estimate of Attrition by Marital Status",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c("Married","Single/Divorced"), fill=c('blue','red'))
+```
+The Kaplan-Meier estimate plot for attrition by marital status displays two different curves separated between ‘Married’ and ‘Single/Divorced’. There is a noticeable distinction between the two curves as the ‘Single/Divorced’ curve has a consistently lower survival rate than the ‘Married’ survival curve. The exponentiated coefficient, which gives us the hazard ratio, suggests that single or divorced employees are 1.66 times as likely to leave the company as those who are married. In other words, this says that a married employee has a hazard rate that is 66% that of a hazard rate for a single or divorced employee. By looking at the exponentiated negative coefficient, we can interpret it from a different perspective by saying that a married employee is 0.6023 times as likely to leave a company than a single or divorced employee. Essentially, the summary suggests that it is significantly more likely that a single or divorced employee leaves the company than a married employee.
+
+### Job Satisfaction
+
+```{r}
+# summary
+cox = coxph(data.surv ~ JobSatisfaction, data = data)
+summary(cox)
+
+# fit plot for OverTime
+JobSatisfaction.fit = survfit(data.surv ~ JobSatisfaction, data = data)
+# plot the fitted survival function
+plot(JobSatisfaction.fit,
+     lwd=1, col=c('red','orange','green','blue'),
+     main="KM Estimate of Attrition by Job Satisfaction",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c("Low","Medium","High","Very High"), fill=c('red','orange','green','blue'))
+```
+The Kaplan-Meier estimate plot of attrition by job satisfaction displays four different curves each representing the different levels of job satisfaction from “low” to “very high”. There is a clear distinction between the ‘low’ and ‘very high’ levels of job satisfaction, but the “medium” and “high” curves seem to overlap. However, it’s clear that lower levels of job satisfaction make it more likely that an employee leaves the company.
+
+### Environment Satisfaction
+
+```{r}
+# summary
+cox = coxph(data.surv ~ EnvironmentSatisfaction, data = data)
+summary(cox)
+
+# fit plot for OverTime
+EnvironmentSatisfaction.fit = survfit(data.surv ~ EnvironmentSatisfaction, data = data)
+# plot the fitted survival function
+plot(EnvironmentSatisfaction.fit,
+     lwd=1, col=c('red','orange','green','blue'),
+     main="KM Estimate of Attrition by Environment Satisfaction",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c("Low","Medium","High","Very High"), fill=c('red','orange','green','blue'))
+```
+We see a similar effect with environment satisfaction where lower levels of environment satisfaction make it more likely that an employee leaves the company. However, in this plot, we find that there is a clear distinction between “low” and all the other values that are higher than “low”, but there is not a lot of distinction between the other three values.
+
+### Job Involvement
+
+```{r}
+# summary
+cox = coxph(data.surv ~ JobInvolvement, data = data)
+summary(cox)
+
+# fit plot for OverTime
+JobInvolvement.fit = survfit(data.surv ~ JobInvolvement, data = data)
+# plot the fitted survival function
+plot(JobInvolvement.fit,
+     lwd=1, col=c('blue','red'),
+     main="KM Estimate of Attrition by Job Involement",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c("High","Low/Medium"), fill=c('blue','red'))
+```
+Job involvement is separated by a score of low/medium or high. The plot shows a clear distinction between the two curves with a score of low/medium having a consistently lower survival curve. Thus, we suspect that a lower level of job involvement means an employee is more likely to leave the company. From the summary output, we see that an employee with a low/medium level of job involvement is 1.555 times or 55.5% more likely to leave the company than an employee with a high level of job involvement.
+
+### Business Travel
+
+```{r}
+# summary
+cox = coxph(data.surv ~ BusinessTravel, data = data)
+summary(cox)
+
+# fit plot for OverTime
+BusinessTravel.fit = survfit(data.surv ~ BusinessTravel, data = data)
+# plot the fitted survival function
+plot(BusinessTravel.fit,
+     lwd=1, col=c('red','blue'),
+     main="KM Estimate of Attrition by Business Travel",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c("No or Rare Travel","Travel Frequently"), fill=c('red','blue'))
+```
+
+The KM plot for business travel shows that employees who travel frequently for business are more likely to leave the company than those who don’t travel or rarely travel for business. The summary output says that employees who travel more frequently are 1.745 times or 74.5% more likely to leave the company than those who do not travel or travel rarely for business.
+
+### Distance From Home
+
+```{r}
+# summary
+cox = coxph(data.surv ~ DistanceFromHome, data = data)
+summary(cox)
+
+# fit plot for JobLevel
+DistanceFromHome.fit = survfit(data.surv ~ DistanceFromHome, data = data)
+# plot the fitted survival function
+plot(DistanceFromHome.fit,
+     lwd=1, col=c('red','orange','green'),
+     main="KM Estimate of Attrition by Distance From Home",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c('1-5', '6-10', '11-29'), fill=c('red','orange','green'))
+```
+The KM plot for distance from home shows that employees who live farther from the office are more likely to leave the company. There is a clear distinction between employees who live 11-29 miles away and employees who live either 1-5 or 6-10 miles away, but there doesn't seem to be a distinction between employees who live 1-5 miles away and 6-10 miles away. Employees who live 11-29 miles away are 1.526 or 52.6% more likely to leave the company than employees who live 1-5 miles away. Thus, it seems that employees who live closer to the office are more likely to stay than employees who live farther.
+
+### MonthlyIncome
+
+```{r}
+data$MonthlyIncome.Cut <- cut(data$MonthlyIncome,
+                       breaks=c(0, 4000, 10000, 30000),
+                       labels=c('1000-4000', '4001-10000', '10000+'))
+
+# summary
+cox = coxph(data.surv ~ MonthlyIncome.Cut, data = data)
+summary(cox)
+
+# fit plot for JobLevel
+MonthlyIncome.fit = survfit(data.surv ~ MonthlyIncome.Cut, data = data)
+# plot the fitted survival function
+plot(MonthlyIncome.fit,
+     lwd=1, col=c('red','orange','green'),
+     main="KM Estimate of Attrition by Monthly Income",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c('1000-4000', '4001-10000', '10000+'), fill=c('red','orange','green'))
+```
+The KM plot for monthly income shows that employees who have higher incomes are more likely to stay at the company than employees who have lower incomes. The KM plot shows a large difference between those who make around 1,000 - 4,000 a month compared to those who make greater than 10,000. Additionally, there is a distinction between those in the middle range who make 4,001 - 10,000 a month to those who make more or less, so the relationship between attrition and monthly income seems to be consistent at all levels. 
+
+### Number of Companies Previously Worked At
+
+```{r}
+# summary
+cox = coxph(data.surv ~ NumCompaniesWorked, data = data)
+summary(cox)
+
+# fit plot for JobLevel
+NumCompaniesWorked.fit = survfit(data.surv ~ NumCompaniesWorked, data = data)
+# plot the fitted survival function
+plot(NumCompaniesWorked.fit,
+     lwd=1, col=c('red','orange','green'),
+     main="KM Estimate of Attrition by Number of Companies Previously Worked",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c('0-1', '2-4', '5-9'), fill=c('red','orange','green'))
+```
+The KM plot for the number of companies an employee previously worked at shows that an interesting result. The summary output suggests that employees who worked at 5-9 companies in the past are 1.684 times more likely to leave the company than employees who worked at 0-1 companies previously. However, it also suggests that employees who worked at 2-4 companies previously are less likely to leave the company than employees who worked at 0-1 companies previously. The summary output suggests that employees who worked at 0-1 companies previously are 1.1877 times or 18.8% more likely to leave than employees who worked at 2-4 companies previously. This result may be due to the fact that employees early on in their careers (worked at 0-1 companies previously) are more likely to move around than those who are likely in the middle or ends of their careers (worked at 2-4 companies previously). However, those who have worked at many companies in the past (5-9) tend to continue their trajectory of switching companies often. 
+
+### Age
+
+```{r}
+data$Age.Cut <- cut(data$Age,
+                       breaks=c(0, 30, 45, 65),
+                       labels=c('18-30', '31-45', '46-60'))
+
+# summary
+cox = coxph(data.surv ~ Age.Cut, data = data)
+summary(cox)
+
+# fit plot for JobLevel
+Age.fit = survfit(data.surv ~ Age.Cut, data = data)
+# plot the fitted survival function
+plot(Age.fit,
+     lwd=1, col=c('red','orange','green'),
+     main="KM Estimate of Attrition by Age",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c('18-30', '31-45', '46-60'), fill=c('red','orange','green'))
+```
+The KM plot with age shows a clear distinction in survival time between employees who are 18-30 years old and employees who are 31-60 years old, but not a lot of distinction between employees who are 31-45 years old and 46-60 years old. The summary output suggests that employees who are 18-30 years old are 3.110 times more likely to leave the company than employees who are between the ages of 31 and 45 and are 4.104 times more likely to leave the company than employees who are between the ages of 46-60 years old. 
+
+### Job Level
+```{r}
+# summary
+cox = coxph(data.surv ~ JobLevel, data = data)
+summary(cox)
+
+# fit plot for JobLevel
+JobLevel.fit = survfit(data.surv ~ JobLevel, data = data)
+# plot the fitted survival function
+plot(JobLevel.fit,
+     lwd=1, col=c('red','orange','green'),
+     main="KM Estimate of Attrition by Job Level",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c("Entry","Mid","Senior"), fill=c('red','orange','green'))
+```
+The KM plot for job level suggests that the lower the job level, the more likely it is that an employee leaves the company. The summary output suggests that entry level employees are 7.99 times more likely to leave the company than senior level employees and 4.609 times more likely to leave than senior level employees.
+
+### OverTime
+
+```{r}
+# summary
+cox = coxph(data.surv ~ OverTime, data = data)
+summary(cox)
+
+# fit plot for OverTime
+OverTime.fit = survfit(data.surv ~ OverTime, data = data)
+# plot the fitted survival function
+plot(OverTime.fit,
+     lwd=1, col=c('green','red'),
+     main="KM Estimate of Attrition by Over Time",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c("No","Yes"), fill=c('green','red'))
+```
+The KM plot for over time suggests that employees who work overtime are more likely to leave than employees who don't. The summary output suggests that employees who work overtime are 3.044 times more likely to leave the company than employees who don't work over time.
+
+### Gender
+
+```{r}
+# summary
+cox = coxph(data.surv ~ Gender, data = data)
+summary(cox)
+
+# fit plot for Gender
+Gender.fit = survfit(data.surv ~ Gender, data = data)
+# plot the fitted survival function
+plot(OverTime.fit,
+     lwd=1, col=c('red','blue'),
+     main="KM Estimate of Attrition by Gender",
+     xlab="Survival Time in Years",
+     ylab="Survival Proportion")
+legend("bottomleft", c("Female","Male"), fill=c('red','blue'))
+```
+The KM plot shows clear distinction between the two genders, but the summary output suggests that the covariate is not significant as the p-value is greater than 0.05 and the 95% confidence interval for the hazards ratio includes the null value one. Although we saw that gender is significant when it is included with the rest of the covariates, we are going to remove this covariate as we have so many already and want to reduce complexity.
+
+# VIII. Checking Cox Proportional Hazards Assumption
+
+```{r}
+attrition.cox <- coxph(data.surv ~ MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel, data=data)
+cox.zph(attrition.cox)
+```
+After running the cox.zph function on our coxph model, we find that some covariates violate the Cox Proportional Hazards assumption. These covariates are the ones that show p-values greater than 0.05 and include MaritalStatus, BusinessTravel, MonthlyIncome, and Age.
+
+Let's take a look at the cloglog plots for these covariates.
+
+### Marital Status
+
+```{r}
+surv.fit <- survfit(data.surv ~ MaritalStatus, data = data)
+plot(surv.fit, fun = "cloglog", lwd = 2, col = c('blue','red'), xlab = "Time", ylab = "log(log(S))")
+legend("topleft", c("Married","Single/Divorced"), fill=c('blue','red'))
+```
+The curves of the cloglog plot for marital status look parallel.
+
+### Business Travel
+
+```{r}
+surv.fit <- survfit(data.surv ~ BusinessTravel, data = data)
+plot(surv.fit, fun = "cloglog", lwd = 2, col = c('red','blue'), xlab = "Time", ylab = "log(log(S))")
+legend("topleft", c("No or Rare Travel","Travel Frequently"), fill=c('red','blue'))
+```
+The curves of the cloglog plot for marital status look parallel.
+
+### Monthly Income
+
+```{r}
+surv.fit <- survfit(data.surv ~ MonthlyIncome.Cut, data = data)
+plot(surv.fit, fun = "cloglog", lwd = 2, col = c('red','orange','green'), xlab = "Time", ylab = "log(log(S))")
+legend("topleft", c('1000-4000', '4001-10000', '10000+'), fill=c('red','orange','green'))
+```
+
+### Age
+
+```{r}
+surv.fit <- survfit(data.surv ~ Age.Cut, data = data)
+plot(surv.fit, fun = "cloglog", lwd = 2, col = c('red','orange','green'), xlab = "Time", ylab = "log(log(S))")
+legend("topleft", c('18-30', '31-45', '46-60'), fill=c('red','orange','green'))
+```
+We see that the curves for "31-45" and "46-60" cross at around 10 years. Thus, it looks like the age covariate is dependent on time and violates the coxph assumption. Let's adjust for this.
+
+## Dealing with Time Dependent Covariates
+
+First, let's create a survSplit object that splits the time component into two: <=10 years AND >10 years.
+
+```{r}
+df.new <- data
+# ensure zero parameter is less than any observed times
+df.new$time2 <- data$YearsAtCompany + (data$YearsAtCompany == 0)/2
+# split time variable into before and after 48 months
+split.data <- survSplit(Surv(time2, status) ~ MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel, data = df.new, cut = 10, start = "start", episode = "Epi", end = "stop", id = "subject")
+```
+
+### Marital Status
+
+Let's see if splitting the marital status covariate by time has a significant effect.
+```{r}
+MaritalStatus.split <- coxph(Surv(start, stop, status) ~ MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+MaritalStatus:Epi, data = split.data)
+summary(MaritalStatus.split)
+```
+The p-value is greater than 0.05 and the 95% CI of the Hazard Ratio includes 1, so we can conclude that stratifying Marital Status does not have a significant effect.
+
+### Business Travel 
+
+Let's see if splitting the BusinessTravel covariate by time has a significant effect.
+```{r}
+BusinessTravel.split <- coxph(Surv(start, stop, status) ~ MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+BusinessTravel:Epi, data = split.data)
+summary(BusinessTravel.split)
+```
+The p-value is greater than 0.05 and the 95% CI of the Hazard Ratio includes 1, so we can conclude that stratifying Business Travel does not have a significant effect.
+
+### Monthly Income
+
+Let's see if splitting the monthly income covariate by time has a significant effect.
+```{r}
+MonthlyIncome.split <- coxph(Surv(start, stop, status) ~ MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+MonthlyIncome:Epi, data = split.data)
+summary(MonthlyIncome.split)
+```
+The p-value is greater than 0.05 and the 95% CI of the Hazard Ratio includes 1, so we can conclude that stratifying Business Travel does not have a significant effect.
+
+### Age
+
+Let's see if splitting the age covariate by time has a significant effect.
+```{r}
+Age.split <- coxph(Surv(start, stop, status) ~ MaritalStatus+JobSatisfaction+DistanceFromHome+BusinessTravel+JobInvolvement+EnvironmentSatisfaction+MonthlyIncome+NumCompaniesWorked+Age+OverTime+JobLevel+Age:Epi, data = split.data)
+summary(Age.split)
+```
+Although it is close, the p-value is greater than 0.05 (0.0647) and the 95% CI of the Hazard Ratio includes 1, so we can conclude that stratifying age does not have a significant effect.
+
+# IX. Additional Method - Clustering Numerical Covariates
+
+One problem we faced with this data was dealing with our continuous covariates. To visualize Kaplan-Meier plots for continuous covariates, we had to factor our continuous variables ourselves. However, doing so puts us at risk of not choosing the right ranges of values for each factor. Here, we are going to find the optimal ranges of values that we should factor our continuous covariates with by using a library called clustcurv. The library consists of two main functions: ksurvcurves which determines groups in multiple survival curves by allowing us to specify the number of clusters and survclustcurv which determines groups in multiple survival curves by choosing the number of clusters automatically. First, let's use the survclustcurv function on the covariate age.
+
+```{r}
+library(clustcurv)
+fit.clust <- survclustcurves(time = data$YearsAtCompany, status = data$status, x = data$Age,
+                     nboot = 5, seed = 123, algorithm = 'kmedians')
+autoplot(fit.clust , groups_by_colour = TRUE)
+```
+As you can see above, the survclustcurv function grouped the mulitple curves into five clusters. The five clusters are roughly grouped by 18-22, 23-29, 30-37, 38-52, and 53-60. This seems to be a more accurate grouping than the three groups we previously had for our model (18-30, 31-45, 46-60). 
+
+```{r}
+fit.clust <- survclustcurves(time = data$YearsAtCompany, status = data$status, x = data$DistanceFromHome,
+                     nboot = 50, seed = 123, algorithm = 'kmedians')
+autoplot(fit.clust , groups_by_colour = TRUE)
+```
+
+For the covariate that represents distance in miles from an employees home to the office, we found that the survclustcurv function gives us just one group. This result may suggest that there aren't any significantly distinguishable groups from this data. Regardless let's use the ksurvcurves function to try to find distinguishable groups.
+
+```{r}
+fit.clust <- ksurvcurves(time = data$YearsAtCompany, status = data$status, x = data$DistanceFromHome, algorithm = 'kmedians', k=3)
+autoplot(fit.clust , groups_by_colour = TRUE)
+```
+After attempting to cluster our DistanceFromHome values, it seems that the values can't clearly be grouped. A rough estimate for the grouping would be two groups that consist of values 1-10 and 11-29. 
+
+```{r}
+fit.clust <- ksurvcurves(time = data$YearsAtCompany, status = data$status, x = data$NumCompaniesWorked, algorithm = 'kmedians', k=2)
+```
+```{r}
+autoplot(fit.clust , groups_by_colour = TRUE)
+```
+For the covariate that represents the number of companies an employee previously worked at, we found that the values can be grouped into two categories which are roughly split between ranges 0-4 and 5-9. 
+
+## Conclusion
+
+For this project, we analyzed an employee dataset of 1470 observations and 17 covaraites to explore how certain factors impact employee attrition. We found significant covariates by using a forward feature selection process and using AIC to determine the best model. For each significant covariate, we plotted Kaplan-Meier curves to examine the effects they have on employee attrition and found the hazard ratios for each covariate. We tested whether any of the significant covariates violated the cox proportional hazards assumption by using the cox.zph function along with plotting the cloglog plots. In the end, we found that we did not need to include any stratified covariates in our model and ended with a model that includes distance an employee lives from the office, job level, how often an employee travels, job involvement, environment satisfaction, monthly income, age, job satisfaction, marital status, the number of companies the employee previously worked at, and whether an employee works overtime or not. With so many high quality covariates to choose from, it seemed that our model was fit well enough without the need of methods like stratification. 
+
+Our goal of this project was to find which variables are most significant in determining employee attrition and how these variables effect employee attrition. The most significant covariates are the 11 covariates that we included in our model and the effect of these covariates on employee attrition are summarized below.
+
+Marital Status
+- Single or divorced employees are 66% more likely to leave the company than employees who are married.
+Job Satisfaction
+- A "low" level of job satisfaction makes it significantly more likely that an employee will leave the company and a "very high" level of job satisfaction makes it significantly more likely that an employee will stay, but whether an employee has a "medium" or "high' level of job satisfaction doesn't have much of an effect.
+Environment Satisfation
+- A "low" level of environment satisfaction makes it significantly more likely that an employee will leave the company, but whether an employee has a "medium", "high', or "very high" level of environment satisfaction doesn't have much of an effect.
+Job Involvemeent
+- Employees with a low/medium level of job involvement are 55.5% more likely to leave the company.
+Frequency of Business Travel
+- Employees who travel for work more frequently are 74.5% more likely to leave the company than employees who don't travel or travel rarely for work.
+Distance From Home
+- Employees who live farther than 10 miles from the office are 52.6% more likely to leave the company.
+Monthly Income
+- The less an employee makes, the more likely it is that the employee will leave the company.
+Number of Companies Previously Worked At
+- Employees who have previously worked at 0-1 companies are semi-prone to leaving the company. Employees who have previously worked at more than 5 companies are at high risk for leaving the company. Employees who have worked at 2-4 companies are most likely to stay.
+Age
+- Younger employees are more likely to leave the company than older employees.
+Job Level
+- The lower the job level, the more likely an employee is to leave the company (Entry level employees are most likely to leave).
+Overtime
+- Employees who work overtime are 3 times more likely to leave the company than an employee who does not.
+
+
+
+
+
+
+
+
+
